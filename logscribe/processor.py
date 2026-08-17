@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -10,6 +11,10 @@ from logscribe.sampler import RawErrorChunk
 TIMESTAMP_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)")
 ERROR_TYPE_PATTERN = re.compile(r"\b([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception))\b")
 KEY_VALUE_PATTERN = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^\s,;]+)")
+
+# Fields already surfaced as dedicated ErrorEvent attributes when the log line is
+# JSON — everything else in the object becomes a key_variable automatically.
+_JSON_CORE_FIELDS = {"timestamp", "service_name", "level", "message", "error_type", "stack_trace"}
 
 
 @dataclass
@@ -43,6 +48,12 @@ class ErrorProcessor:
     def process(self, chunk: RawErrorChunk) -> ErrorEvent:
         context_text = "\n".join(chunk.context_lines)
 
+        json_fields = self._try_parse_json(chunk.trigger_line)
+        if json_fields is not None:
+            return self._process_json(chunk, json_fields, context_text)
+        return self._process_text(chunk, context_text)
+
+    def _process_text(self, chunk: RawErrorChunk, context_text: str) -> ErrorEvent:
         error_type = self._extract_error_type(chunk.trigger_line, context_text)
         message = self._extract_message(chunk.trigger_line, error_type)
         stack_trace = self._extract_stack_trace(chunk.context_lines)
@@ -60,6 +71,39 @@ class ErrorProcessor:
             line_number=chunk.line_number,
             raw_context=context_text,
         )
+
+    def _process_json(self, chunk: RawErrorChunk, fields: dict, context_text: str) -> ErrorEvent:
+        """Structured JSON logs (e.g. fooddash) carry their own message/error_type/
+        timestamp directly — read them instead of running text regexes over the
+        object's serialized form, which finds fields by accident (if at all) and
+        mangles anything positional, like `message` extraction."""
+        error_type = str(fields.get("error_type") or fields.get("level") or "UnknownError")
+        message = str(fields.get("message", chunk.trigger_line))
+        stack_trace = str(fields["stack_trace"]) if fields.get("stack_trace") else self._extract_stack_trace(chunk.context_lines)
+        timestamp = str(fields["timestamp"]) if fields.get("timestamp") else self._extract_timestamp(chunk.trigger_line, context_text)
+        key_variables = {
+            key: str(value) for key, value in fields.items() if key not in _JSON_CORE_FIELDS and value is not None
+        }
+
+        return ErrorEvent(
+            id=str(uuid.uuid4()),
+            error_type=error_type,
+            message=message,
+            stack_trace=stack_trace,
+            key_variables=key_variables,
+            timestamp=timestamp,
+            source_file=chunk.source_file,
+            line_number=chunk.line_number,
+            raw_context=context_text,
+        )
+
+    @staticmethod
+    def _try_parse_json(line: str) -> dict | None:
+        try:
+            parsed = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     @staticmethod
     def _extract_error_type(trigger_line: str, context_text: str) -> str:
