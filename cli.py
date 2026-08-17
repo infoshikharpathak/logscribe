@@ -5,9 +5,11 @@ from pathlib import Path
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from logscribe.analyzer import OpenAIAnalyzer
+from logscribe.incident import OnCallCurator
 from logscribe.memory import ErrorMemory
 from logscribe.processor import ErrorProcessor
 from logscribe.sampler import LogSampler
@@ -32,6 +34,7 @@ def watch(
     processor = ErrorProcessor()
     memory = ErrorMemory()
     analyzer = OpenAIAnalyzer()
+    curator = OnCallCurator()
 
     console.print(f"[bold green]Watching[/bold green] {file} (buffer={buffer_size} lines)...")
 
@@ -46,7 +49,13 @@ def watch(
         console.print("\n[bold cyan]Root-cause analysis:[/bold cyan]")
         console.print(analysis)
 
-        memory.add(event)
+        extra_metadata = {}
+        if not memory.has_error_type(event.error_type):
+            card = curator.curate(event)
+            extra_metadata = card.to_metadata()
+            console.print(Panel(card.summary, title="🆕 New error type — on-call summary", border_style="yellow"))
+
+        memory.add(event, extra_metadata=extra_metadata)
 
 
 @app.command()
@@ -110,6 +119,29 @@ def history(
         )
 
     console.print(table)
+
+
+@app.command()
+def incidents(
+    limit: int = typer.Option(20, help="Number of recent incidents to list."),
+) -> None:
+    """List curated on-call summaries for newly-seen error types."""
+    memory = ErrorMemory()
+    items = memory.list_incidents(limit=limit)
+
+    if not items:
+        console.print("[yellow]No incidents recorded yet.[/yellow]")
+        raise typer.Exit()
+
+    for item in items:
+        meta = item["metadata"]
+        console.print(
+            Panel(
+                meta.get("incident_summary", ""),
+                title=f"{meta.get('error_type', '')} — {meta.get('timestamp', '')}",
+                border_style="yellow",
+            )
+        )
 
 
 if __name__ == "__main__":

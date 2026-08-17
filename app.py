@@ -12,6 +12,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from logscribe.analyzer import OpenAIAnalyzer
+from logscribe.incident import OnCallCurator
 from logscribe.memory import ErrorMemory
 from logscribe.processor import ErrorProcessor
 from logscribe.sampler import scan_lines
@@ -31,14 +32,20 @@ def get_analyzer() -> OpenAIAnalyzer:
     return OpenAIAnalyzer()
 
 
+@st.cache_resource
+def get_curator() -> OnCallCurator:
+    return OnCallCurator()
+
+
 processor = ErrorProcessor()
 memory = get_memory()
 analyzer = get_analyzer()
+curator = get_curator()
 
 st.title("logscribe")
 st.caption("Tail-based log monitoring with RAG-powered error analysis.")
 
-tab_analyze, tab_search, tab_history = st.tabs(["Analyze", "Search", "History"])
+tab_analyze, tab_search, tab_history, tab_incidents = st.tabs(["Analyze", "Search", "History", "Incidents"])
 
 # ── Analyze ──────────────────────────────────────────────────────────────────
 
@@ -85,7 +92,14 @@ with tab_analyze:
                     st.markdown("**Root-cause analysis**")
                     st.markdown(analysis)
 
-                    memory.add(event)
+                    extra_metadata = {}
+                    if not memory.has_error_type(event.error_type):
+                        with st.spinner("Curating on-call summary for this new error type..."):
+                            card = curator.curate(event)
+                        extra_metadata = card.to_metadata()
+                        st.warning(f"🆕 **New error type — on-call summary**\n\n{card.summary}")
+
+                    memory.add(event, extra_metadata=extra_metadata)
                     st.success("Stored — this error is now searchable and will inform future analyses.")
 
 # ── Search ───────────────────────────────────────────────────────────────────
@@ -136,3 +150,20 @@ with tab_history:
             ],
             use_container_width=True,
         )
+
+# ── Incidents ────────────────────────────────────────────────────────────────
+
+with tab_incidents:
+    st.subheader("On-call incident summaries")
+    st.caption("One curated summary per new error type — not every occurrence.")
+    incident_limit = st.slider("Show last N", 5, 50, 20, key="incident_limit")
+    incident_items = memory.list_incidents(limit=incident_limit)
+
+    if not incident_items:
+        st.info("No new error types curated yet.")
+    else:
+        for item in incident_items:
+            meta = item["metadata"]
+            with st.container(border=True):
+                st.markdown(f"**{meta.get('error_type', '')}** — {meta.get('timestamp', '')}")
+                st.write(meta.get("incident_summary", ""))

@@ -28,20 +28,31 @@ errors it has seen before.
        │  memory.py  │◀──similar─│ analyzer.py │
        │  ChromaDB   │  errors   │ (pluggable) │──▶ root-cause analysis
        │(store+query)│           │             │
-       └─────────────┘           └─────────────┘
+       └──────┬──────┘           └─────────────┘
+              │ first time this error_type is seen
+              ▼
+       ┌─────────────┐
+       │ incident.py │──▶ short on-call summary (when/what/why, no deep dive)
+       └─────────────┘
 ```
 
 1. **sampler.py** tails a log file with a rolling buffer of the last N lines
    and flags a line as an error when it matches a configurable regex pattern.
 2. **processor.py** turns the raw window of lines into a structured
    `ErrorEvent` (error type, message, stack trace, key variables, timestamp).
+   Handles both plaintext/traceback-style logs and structured JSON log lines.
 3. **memory.py** embeds the event and stores it in a local ChromaDB
    collection; on each new error it retrieves the top-k most semantically
-   similar past errors.
+   similar past errors. Also tracks which `error_type`s have been seen before.
 4. **analyzer.py** sends the new error plus similar past errors to an LLM for
    a root-cause hypothesis. It's defined behind an `ErrorAnalyzer` protocol so
    the direct OpenAI call can later be swapped for
    [agent-forge](../agent-forge) without touching any other module.
+5. **incident.py** curates a short on-call notice — 2-4 sentences, when/what/
+   likely-why, deliberately *not* a deep investigation — but only the first
+   time a given `error_type` shows up. Repeat occurrences of an already-known
+   error skip curation entirely, so the signal stays about genuinely new
+   incidents rather than every recurrence of something already understood.
 
 ## Quick start
 
@@ -70,6 +81,7 @@ logscribe history
 | `logscribe watch --file <path>` | Tail a log file, capture errors, auto-analyze each one |
 | `logscribe query "<description>"` | Semantic search over past errors |
 | `logscribe history` | List recently captured errors |
+| `logscribe incidents` | List curated on-call summaries for newly-seen error types |
 
 Run `logscribe <command> --help` for the full set of options (buffer size,
 top-k, tailing from the start of the file, etc).
@@ -84,12 +96,14 @@ browse or search everything already stored.
 streamlit run app.py
 ```
 
-Three tabs, mirroring the CLI commands:
+Four tabs, mirroring the CLI commands:
 - **Analyze** — paste raw log lines (including a traceback if you have one) and
   hit "Detect & analyze"; runs the same detection logic as `logscribe watch`
-  and stores the result.
+  and stores the result. Shows a curated on-call summary inline the first time
+  a given error type is seen.
 - **Search** — same as `logscribe query`, semantic search over past errors.
 - **History** — same as `logscribe history`, a table of recently captured errors.
+- **Incidents** — same as `logscribe incidents`, curated on-call summaries.
 
 ## Current limitations / out of scope (for now)
 
@@ -122,8 +136,11 @@ Roughly in priority order:
 4. **Resolution tracking** — mark a captured error as resolved, and factor
    resolution status into what `analyzer.py` surfaces (e.g. "this looks like
    issue #42, already fixed by X").
-5. **Alerting** — optional Slack/PagerDuty notification when a new error type
-   (not just a new occurrence) is captured.
+5. **Alerting delivery** — the new-error-type detection and on-call curation
+   already exist (`incident.py`, surfaced via `logscribe incidents` and the
+   UI's Incidents tab); what's still missing is pushing that curated summary
+   somewhere external — Slack/PagerDuty/email — instead of only being visible
+   when someone checks the CLI/UI.
 6. **Better error-type classification** — the current regex-based
    `error_type`/`stack_trace` extraction in `processor.py` is tuned for
    Python-style tracebacks; extend it (or make it pluggable per log format)

@@ -30,20 +30,41 @@ class ErrorMemory:
             embedding_function=self._embedding_fn,
         )
 
-    def add(self, event: ErrorEvent) -> None:
+    def add(self, event: ErrorEvent, extra_metadata: dict[str, Any] | None = None) -> None:
+        metadata = {
+            "error_type": event.error_type,
+            "message": event.message,
+            "timestamp": event.timestamp,
+            "source_file": event.source_file,
+            "line_number": event.line_number,
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
+
         self._collection.add(
             ids=[event.id],
             documents=[event.to_document()],
-            metadatas=[
-                {
-                    "error_type": event.error_type,
-                    "message": event.message,
-                    "timestamp": event.timestamp,
-                    "source_file": event.source_file,
-                    "line_number": event.line_number,
-                }
-            ],
+            metadatas=[metadata],
         )
+
+    def has_error_type(self, error_type: str) -> bool:
+        """Whether any previously stored error already has this error_type — used to
+        detect a genuinely new/unfamiliar error type worth curating an on-call
+        summary for, versus the Nth occurrence of something already seen."""
+        if self._collection.count() == 0:
+            return False
+        results = self._collection.get(where={"error_type": error_type}, limit=1)
+        return len(results["ids"]) > 0
+
+    def list_incidents(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Entries with a curated on-call summary attached (see incident.py)."""
+        results = self._collection.get(where={"is_incident": True}, limit=limit)
+        items = [
+            {"id": id_, "document": doc, "metadata": meta}
+            for id_, doc, meta in zip(results["ids"], results["documents"], results["metadatas"])
+        ]
+        items.sort(key=lambda item: item["metadata"].get("timestamp", ""), reverse=True)
+        return items
 
     def query_similar(self, text: str, top_k: int = 5) -> list[dict[str, Any]]:
         if self._collection.count() == 0:
