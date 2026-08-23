@@ -8,7 +8,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from logscribe.analyzer import OpenAIAnalyzer
+from logscribe.analyzer import build_analyzer
 from logscribe.incident import OnCallCurator
 from logscribe.memory import ErrorMemory
 from logscribe.processor import ErrorProcessor
@@ -33,7 +33,7 @@ def watch(
     sampler = LogSampler(file, buffer_size=buffer_size)
     processor = ErrorProcessor()
     memory = ErrorMemory()
-    analyzer = OpenAIAnalyzer()
+    analyzer = build_analyzer()
     curator = OnCallCurator()
 
     console.print(f"[bold green]Watching[/bold green] {file} (buffer={buffer_size} lines)...")

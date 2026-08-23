@@ -8,10 +8,13 @@ Run:
     streamlit run app.py
 """
 
+import os
+
+import httpx
 import streamlit as st
 from dotenv import load_dotenv
 
-from logscribe.analyzer import OpenAIAnalyzer
+from logscribe.analyzer import build_analyzer
 from logscribe.incident import OnCallCurator
 from logscribe.memory import ErrorMemory
 from logscribe.processor import ErrorProcessor
@@ -21,6 +24,25 @@ load_dotenv()
 
 st.set_page_config(page_title="logscribe", page_icon="📜", layout="wide")
 
+AGENT_FORGE_URL = os.getenv("AGENT_FORGE_URL", "http://localhost:8000")
+
+
+def fetch_agent_forge_traces(
+    *, limit: int = 20, app_id: str | None = "logscribe", status: str | None = None,
+) -> list[dict]:
+    params: dict = {"limit": limit}
+    if app_id:
+        params["app_id"] = app_id
+    if status:
+        params["status"] = status
+    try:
+        resp = httpx.get(f"{AGENT_FORGE_URL}/traces", params=params, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        st.error(f"Could not reach agent-forge at {AGENT_FORGE_URL}: {exc}")
+        return []
+
 
 @st.cache_resource
 def get_memory() -> ErrorMemory:
@@ -28,8 +50,8 @@ def get_memory() -> ErrorMemory:
 
 
 @st.cache_resource
-def get_analyzer() -> OpenAIAnalyzer:
-    return OpenAIAnalyzer()
+def get_analyzer():
+    return build_analyzer()
 
 
 @st.cache_resource
@@ -45,7 +67,9 @@ curator = get_curator()
 st.title("logscribe")
 st.caption("Tail-based log monitoring with RAG-powered error analysis.")
 
-tab_analyze, tab_search, tab_history, tab_incidents = st.tabs(["Analyze", "Search", "History", "Incidents"])
+tab_analyze, tab_search, tab_history, tab_incidents, tab_traces = st.tabs(
+    ["Analyze", "Search", "History", "Incidents", "Agent Forge Traces"]
+)
 
 # ── Analyze ──────────────────────────────────────────────────────────────────
 
@@ -167,3 +191,90 @@ with tab_incidents:
             with st.container(border=True):
                 st.markdown(f"**{meta.get('error_type', '')}** — {meta.get('timestamp', '')}")
                 st.write(meta.get("incident_summary", ""))
+
+# ── Agent Forge Traces ──────────────────────────────────────────────────────
+# Only meaningful when LOGSCRIBE_ANALYZER=agent_forge — reads agent-forge's own
+# traceability API directly, so you can see exactly how it reasoned (which
+# agents ran, what each one produced, git/filesystem tool use) without leaving
+# logscribe's UI.
+
+with tab_traces:
+    st.subheader("Agent Forge run history")
+    st.caption(
+        f"Reading from {AGENT_FORGE_URL} — only populated when "
+        "LOGSCRIBE_ANALYZER=agent_forge is set."
+    )
+
+    col_a, col_b, col_c = st.columns([2, 2, 1])
+    with col_a:
+        traces_app_filter = st.text_input("App ID", value="logscribe", key="af_app_filter")
+    with col_b:
+        traces_status_filter = st.selectbox(
+            "Status", ["", "success", "partial", "failed"], key="af_status_filter"
+        )
+    with col_c:
+        st.write("")
+        st.button("🔄 Refresh", key="af_refresh")
+
+    af_traces = fetch_agent_forge_traces(
+        app_id=traces_app_filter or None, status=traces_status_filter or None,
+    )
+
+    if not af_traces:
+        st.info(
+            "No agent-forge traces yet — analyze an error with "
+            "LOGSCRIBE_ANALYZER=agent_forge set, or clear the App ID filter above."
+        )
+    else:
+        st.dataframe(
+            [
+                {
+                    "run_id": t["run_id"][:8],
+                    "timestamp": t["timestamp"][:19],
+                    "tier": t["routing_tier"],
+                    "framework": t.get("framework_used") or "-",
+                    "outcome": t["outcome"],
+                    "latency_ms": t["total_latency_ms"],
+                    "cost_usd": t["total_cost_usd"],
+                    "tokens_in": t["total_input_tokens"],
+                    "tokens_out": t["total_output_tokens"],
+                }
+                for t in af_traces
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("##### Run detail")
+        af_run_options = {
+            f"{t['run_id'][:8]} — {t['timestamp'][:19]} ({t['outcome']})": t for t in af_traces
+        }
+        af_selected = st.selectbox(
+            "Select a run to inspect", list(af_run_options.keys()), key="af_trace_detail_select"
+        )
+        if af_selected:
+            af_detail = af_run_options[af_selected]
+            with st.expander("Goal sent to agent-forge"):
+                st.text(af_detail["task"])
+            if af_detail.get("error"):
+                st.error(af_detail["error"])
+            if af_detail["guardrails_triggered"]:
+                st.warning(f"Guardrails triggered: {', '.join(af_detail['guardrails_triggered'])}")
+
+            if af_detail.get("report"):
+                st.markdown("**Final report**")
+                st.markdown(af_detail["report"])
+                st.divider()
+
+            if af_detail["agents_spawned"]:
+                st.markdown("**Agents spawned**")
+                st.dataframe(
+                    [{k: v for k, v in a.items() if k != "content"} for a in af_detail["agents_spawned"]],
+                    use_container_width=True, hide_index=True,
+                )
+                st.markdown("**Agent output**")
+                for a in af_detail["agents_spawned"]:
+                    with st.expander(f"`{a['agent_id']}` — {a['model']} ({a['status']})"):
+                        st.markdown(a.get("content") or "_(no content recorded)_")
+            else:
+                st.caption("No agent-level data recorded for this run.")
