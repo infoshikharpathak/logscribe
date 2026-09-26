@@ -1,0 +1,33 @@
+name: CI
+
+# No test suite yet — this is an honest smoke check, not a "tests passing"
+# claim: verifies the package installs cleanly and both the `logscribe`
+# package and the `cli` entry module import without error on a fresh
+# environment. A dummy API key avoids import-time failures from client
+# construction (no network calls are made).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Import smoke test
+        env:
+          OPENAI_API_KEY: dummy-key-for-ci
+        run: |
+          python -c "import logscribe; print('logscribe package imports cleanly')"
+          python -c "import cli; print('cli module imports cleanly')"

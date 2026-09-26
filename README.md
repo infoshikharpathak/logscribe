@@ -1,5 +1,9 @@
 # logscribe
 
+[![CI](https://github.com/infoshikharpathak/logscribe/actions/workflows/ci.yml/badge.svg)](https://github.com/infoshikharpathak/logscribe/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+
 Tail-based log monitoring with AI-powered error analysis using RAG.
 
 logscribe watches a log file, catches errors as they happen, and tells you the
