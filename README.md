@@ -40,14 +40,21 @@ errors it has seen before.
        └─────────────┘
 ```
 
-1. **sampler.py** tails a log file with a rolling buffer of the last N lines
-   and flags a line as an error when it matches a configurable regex pattern.
+1. **sampler.py** tails one or more log files (each with its own rolling
+   buffer of the last N lines and an optional service name) and flags a line
+   as an error when it matches a configurable regex pattern. Structured JSON
+   lines are judged by their `level` field instead (ERROR, CRITICAL, FATAL).
 2. **processor.py** turns the raw window of lines into a structured
    `ErrorEvent` (error type, message, stack trace, key variables, timestamp).
    Handles both plaintext/traceback-style logs and structured JSON log lines.
 3. **memory.py** embeds the event and stores it in a local ChromaDB
    collection; on each new error it retrieves the top-k most semantically
-   similar past errors. Also tracks which `error_type`s have been seen before.
+   similar past errors, each with a similarity score (cosine, 1.0 =
+   identical). Only the error's identity is embedded (type, message, service,
+   endpoint, the exception's last line), so boilerplate shared by unrelated
+   errors doesn't decide the match. It can also hold **seeded incidents**:
+   resolved examples with a symptom, cause and fix, shown to the analyzer
+   when they match. Also tracks which `error_type`s have been seen before.
 4. **analyzer.py** sends the new error plus similar past errors to an LLM for
    a root-cause hypothesis. It's defined behind an `ErrorAnalyzer` protocol,
    with two implementations: `OpenAIAnalyzer` (default, a direct chat
@@ -85,13 +92,76 @@ logscribe history
 
 | Command | Description |
 |---|---|
-| `logscribe watch --file <path>` | Tail a log file, capture errors, auto-analyze each one |
+| `logscribe watch --file <path>` | Tail a log file (repeat `--file` for several), capture errors, auto-analyze each one |
+| `logscribe watch --config <app.toml>` | Same, for the files, service names and history a watch config names |
+| `logscribe seed --config <app.toml>` | Load seeded example incidents (symptom, cause, fix) into the history |
 | `logscribe query "<description>"` | Semantic search over past errors |
 | `logscribe history` | List recently captured errors |
 | `logscribe incidents` | List curated on-call summaries for newly-seen error types |
 
 Run `logscribe <command> --help` for the full set of options (buffer size,
-top-k, tailing from the start of the file, etc).
+top-k, tailing from the start of the file, etc). `watch --report out.jsonl`
+also appends each analysis (the error, its matches with similarity scores,
+the root cause and any on-call summary) as one JSON line.
+
+`query`, `history` and `incidents` take `--config` too, to read that
+config's history instead of the default one.
+
+## Watch configs
+
+A TOML file names the files to tail, their service names, and the ChromaDB
+collection their history lives in (so one app's errors aren't matched
+against another's):
+
+```toml
+name = "ironclad"
+collection = "ironclad_errors"
+top_k = 5
+min_similarity = 0.3          # drop weaker matches
+seeds = "seed_incidents.json" # for `logscribe seed --config ...`
+
+[[sources]]
+service = "bank-service"
+path = "${IRONCLAD_LOG_DIR:-../logs}/bank-service.log"
+
+[[sources]]
+service = "agent-service"
+path = "${IRONCLAD_LOG_DIR:-../logs}/agent-service.log"
+```
+
+Paths are relative to the config file; `${VAR}` and `${VAR:-default}` are
+expanded. A file that doesn't exist yet is picked up once it's created; a
+truncated or rotated file is reread from the start. The Ironclad config and
+its seeded incidents live in the Ironclad repo (`logscribe/`).
+
+## Seeded incidents
+
+RAG over past errors needs past errors. A seed file is a list of resolved
+example incidents:
+
+```json
+{"seeded_examples": true,
+ "incidents": [{"id": "postgres-down", "service_name": "bank-service",
+                "error_type": "ConnectionRefusedError",
+                "message": "Database error: ConnectionRefusedError: Connect call failed",
+                "symptom": "Every database endpoint returns 500",
+                "cause": "Postgres was stopped", "fix": "Start Postgres; the pool reconnects"}]}
+```
+
+`logscribe seed` upserts them (loading again updates, never duplicates),
+marked `seeded`; watch output and reports show them as "seeded example",
+and the analyzer prompt includes their cause and fix. They don't count as
+"seen before" for on-call curation, so the first real occurrence of a type
+still gets a card.
+
+## Tests
+
+```bash
+pip install -e ".[test]"
+pytest -q
+```
+
+No network or model download: tests use a small deterministic embedding.
 
 ## UI
 
@@ -141,28 +211,26 @@ changes to logscribe itself.
 
 ## Current limitations / out of scope (for now)
 
-- **Single file, single process** — `logscribe watch` tails one local file via
-  polling. It's not a centralized ingestion pipeline; watching many
-  services/hosts today means running one `logscribe watch` per file.
+- **Local files, one process** — `logscribe watch` tails local files by
+  polling (several at once). It's not a centralized ingestion pipeline;
+  services on other hosts need their logs shipped to where it runs.
 - No batch/EOD mode, no resolution tracking, no alerting/PagerDuty integration.
 
 ## Roadmap / future plans
 
 Roughly in priority order:
 
-1. **Multi-source ingestion** — front `logscribe` with a log shipper
-   (Filebeat, Fluentd, or Vector) that tails many files/containers/hosts and
-   forwards to a single stream or endpoint that `logscribe` consumes, instead
-   of one `watch` process per file. Only worth doing once there's an actual
-   multi-service use case — the current single-file tailer is intentional for
-   the MVP.
+1. **Multi-host ingestion** — several local files are supported (`--config`);
+   for many hosts or containers, front `logscribe` with a log shipper
+   (Filebeat, Fluentd, or Vector) forwarding to one stream it consumes.
 2. **watchdog-based tailing** — swap the polling loop in `sampler.py` for
    filesystem events (`watchdog`) if poll latency ever becomes noticeable at
    real log volumes. No API change needed — `LogSampler.tail()`'s interface
    stays the same.
-3. **Resolution tracking** — mark a captured error as resolved, and factor
-   resolution status into what `analyzer.py` surfaces (e.g. "this looks like
-   issue #42, already fixed by X").
+3. **Resolution tracking** — seeded incidents carry a cause and fix; captured
+   errors can't be marked resolved yet. Letting them (e.g. "this looks like
+   issue #42, already fixed by X") would make real history as useful as the
+   seeds.
 4. **Alerting delivery** — the new-error-type detection and on-call curation
    already exist (`incident.py`, surfaced via `logscribe incidents` and the
    UI's Incidents tab); what's still missing is pushing that curated summary
