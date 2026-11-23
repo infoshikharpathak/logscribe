@@ -59,6 +59,8 @@ class OpenAIAnalyzer:
             f"Timestamp: {event.timestamp}",
             f"Source: {event.source_file}:{event.line_number}",
         ]
+        if event.related_lines:
+            lines += ["", "## Log lines for this request", event.related_context()]
 
         if similar_events:
             lines.append("\n## Similar past errors (most similar first)")

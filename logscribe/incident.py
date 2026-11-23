@@ -41,6 +41,10 @@ class OnCallCurator:
             f"Occurred at: {event.timestamp}\n"
             f"Source: {event.source_file}:{event.line_number}"
         )
+        if event.related_lines:
+            # Only the failing request's own lines (or the service's latest),
+            # never the whole buffer: other requests' errors aren't this one's cause.
+            prompt += f"\n\nLog lines for this request:\n{event.related_context()}"
         response = self._client.chat.completions.create(
             model=self.model,
             messages=[

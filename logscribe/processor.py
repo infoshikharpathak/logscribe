@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from logscribe.sampler import RawErrorChunk
@@ -21,6 +21,9 @@ _JSON_CORE_FIELDS = {"timestamp", "service_name", "level", "message", "error_typ
 # error look less alike.
 VOLATILE_FIELDS = {"request_id", "duration_ms", "trace_id", "attempts"}
 
+# Fallback when a line has no request_id: this many of the service's latest lines.
+RELATED_FALLBACK_LINES = 5
+
 
 @dataclass
 class ErrorEvent:
@@ -36,6 +39,13 @@ class ErrorEvent:
     line_number: int
     raw_context: str
     service_name: str | None = None
+    # The log lines about this failure: the same request's lines (by
+    # request_id), else the same service's most recent lines. raw_context is
+    # the whole rolling buffer, which can hold other requests' errors.
+    related_lines: list[str] = field(default_factory=list)
+
+    def related_context(self) -> str:
+        return "\n".join(self.related_lines)
 
     def to_document(self) -> str:
         """Flatten the event into a single text blob suitable for embedding."""
@@ -96,6 +106,7 @@ class ErrorProcessor:
             line_number=chunk.line_number,
             raw_context=context_text,
             service_name=chunk.service_name,
+            related_lines=chunk.context_lines[-RELATED_FALLBACK_LINES:],
         )
 
     def _process_json(self, chunk: RawErrorChunk, fields: dict, context_text: str) -> ErrorEvent:
@@ -105,7 +116,13 @@ class ErrorProcessor:
         mangles anything positional, like `message` extraction."""
         error_type = str(fields.get("error_type") or fields.get("level") or "UnknownError")
         message = str(fields.get("message", chunk.trigger_line))
-        stack_trace = str(fields["stack_trace"]) if fields.get("stack_trace") else self._extract_stack_trace(chunk.context_lines)
+        # Only this line's own trace (or a plain-text traceback written after
+        # it): searching the whole buffer would take another request's
+        # stack_trace field as this error's.
+        trigger_at = max(i for i, line in enumerate(chunk.context_lines) if line == chunk.trigger_line) \
+            if chunk.trigger_line in chunk.context_lines else len(chunk.context_lines)
+        stack_trace = str(fields["stack_trace"]) if fields.get("stack_trace") else \
+            self._extract_stack_trace(chunk.context_lines[trigger_at + 1:])
         timestamp = str(fields["timestamp"]) if fields.get("timestamp") else self._extract_timestamp(chunk.trigger_line, context_text)
         key_variables = {
             key: str(value) for key, value in fields.items() if key not in _JSON_CORE_FIELDS and value is not None
@@ -122,7 +139,20 @@ class ErrorProcessor:
             line_number=chunk.line_number,
             raw_context=context_text,
             service_name=str(fields["service_name"]) if fields.get("service_name") else chunk.service_name,
+            related_lines=self._related_json_lines(chunk, fields, trigger_at),
         )
+
+    def _related_json_lines(self, chunk: RawErrorChunk, fields: dict, trigger_at: int) -> list[str]:
+        """This request's lines up to and including the error (by request_id);
+        without a request_id, the same service's last few lines."""
+        lines = chunk.context_lines[: trigger_at + 1]
+        parsed = [(line, self._try_parse_json(line)) for line in lines]
+        request_id = fields.get("request_id")
+        if request_id:
+            return [line for line, obj in parsed if obj and obj.get("request_id") == request_id]
+        service = fields.get("service_name") or chunk.service_name
+        same = [line for line, obj in parsed if obj and (obj.get("service_name") or chunk.service_name) == service]
+        return same[-RELATED_FALLBACK_LINES:]
 
     @staticmethod
     def _try_parse_json(line: str) -> dict | None:
