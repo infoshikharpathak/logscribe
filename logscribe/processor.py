@@ -50,6 +50,22 @@ class ErrorEvent:
             parts.append(f"stack_trace:\n{self.stack_trace}")
         return "\n".join(parts)
 
+    def embedding_text(self) -> str:
+        """What gets embedded and matched: the error's identity only (type,
+        message, service, endpoint, the exception's last line). Variables and
+        full stack traces share boilerplate across unrelated errors (method,
+        status code, framework frames, paths) that would outweigh it; they
+        stay in to_document(), which the analysis prompt uses."""
+        parts = [f"error_type: {self.error_type}", f"message: {self.message}"]
+        if self.service_name:
+            parts.append(f"service: {self.service_name}")
+        if self.key_variables.get("endpoint"):
+            parts.append(f"endpoint: {self.key_variables['endpoint']}")
+        last = next((ln.strip() for ln in reversed(self.stack_trace.splitlines()) if ln.strip()), "")
+        if last and last not in self.message:
+            parts.append(f"exception: {last}")
+        return "\n".join(parts)
+
 
 class ErrorProcessor:
     """Turns a RawErrorChunk (raw log lines) into a structured ErrorEvent."""

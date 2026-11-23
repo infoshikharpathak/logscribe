@@ -24,7 +24,7 @@ def test_seeds_are_upserted_marked_and_scored(memory):
     memory.add_seed(SEED)
     memory.add_seed(SEED)  # loading again updates, doesn't duplicate
     assert len(memory.recent()) == 1
-    (match,) = memory.query_similar(event("ConnectionRefusedError", SEED["message"]).to_document())
+    (match,) = memory.query_similar(event("ConnectionRefusedError", SEED["message"]).embedding_text())
     assert match["metadata"]["seeded"] is True and match["metadata"]["fix"] == SEED["fix"]
     assert 0.5 < match["similarity"] <= 1.0
 
@@ -42,17 +42,17 @@ def test_second_occurrence_matches_the_first_above_unrelated_ones(memory):
     memory.add(first)
     memory.add(event("MERCHANT_KEY_INVALID", "MERCHANT_KEY_INVALID: Unknown merchant key.", endpoint="/payments/requests"))
     second = event("OTP_MAX_ATTEMPTS", first.message, endpoint="/transfers/{transfer_id}/confirm", request_id="bbb")
-    matches = memory.query_similar(second.to_document(), top_k=2)
+    matches = memory.query_similar(second.embedding_text(), top_k=2)
     assert matches[0]["id"] == first.id
     assert matches[0]["similarity"] == pytest.approx(1.0, abs=1e-3)  # request_id isn't embedded
     assert matches[0]["similarity"] > matches[1]["similarity"]
-    assert [m["id"] for m in memory.query_similar(second.to_document(), top_k=2, min_similarity=0.9)] == [first.id]
+    assert [m["id"] for m in memory.query_similar(second.embedding_text(), top_k=2, min_similarity=0.9)] == [first.id]
 
 
 def test_prompt_shows_scores_and_seeded_cause_and_fix(memory):
     memory.add_seed(SEED)
     new = event("ConnectionRefusedError", SEED["message"])
-    prompt = OpenAIAnalyzer._build_prompt(new, memory.query_similar(new.to_document()))
+    prompt = OpenAIAnalyzer._build_prompt(new, memory.query_similar(new.embedding_text()))
     assert "service: bank-service" in prompt
     assert "[seeded example, resolved] (similarity" in prompt
     assert f"Cause: {SEED['cause']}" in prompt and f"Fix: {SEED['fix']}" in prompt
@@ -75,3 +75,25 @@ def test_seed_file_validation(tmp_path):
     bad.write_text(json.dumps({"incidents": [{**SEED, "fix": ""}]}))
     with pytest.raises(ValueError, match="fix"):
         seeds.load_seed_file(bad)
+
+
+def test_embedding_text_is_the_errors_identity_not_its_boilerplate():
+    ev = event("ConnectionRefusedError", "Database error: ConnectionRefusedError: refused",
+               endpoint="/accounts", method="GET", status_code="500", request_id="r9")
+    ev.stack_trace = 'Traceback (most recent call last):\n  File "/srv/app.py", line 3\nConnectionRefusedError: [Errno 61] refused'
+    text = ev.embedding_text()
+    assert "endpoint: /accounts" in text and "service: bank-service" in text
+    assert "exception: ConnectionRefusedError: [Errno 61] refused" in text
+    assert "method" not in text and "status_code" not in text and "/srv/app.py" not in text and "r9" not in text
+    assert "stack_trace" in ev.to_document() and "method=GET" in ev.to_document()  # the prompt keeps it all
+
+
+def test_unrelated_errors_from_one_service_dont_outrank_the_matching_seed(memory):
+    merchant_seed = {"id": "key", "service_name": "bank-service", "error_type": "MERCHANT_KEY_INVALID",
+                     "message": "MERCHANT_KEY_INVALID: Unknown merchant key.", "symptom": "s", "cause": "c", "fix": "f"}
+    memory.add_seed(merchant_seed)
+    memory.add(event("OTP_MAX_ATTEMPTS", "OTP_MAX_ATTEMPTS: Too many incorrect OTP attempts. Transfer cancelled.",
+                     endpoint="/transfers/{transfer_id}/confirm", method="POST", status_code="422"))
+    new = event("MERCHANT_KEY_INVALID", "MERCHANT_KEY_INVALID: Unknown merchant key.",
+                endpoint="/payments/requests", method="POST", status_code="401")
+    assert memory.query_similar(new.embedding_text())[0]["id"] == "seed-key"

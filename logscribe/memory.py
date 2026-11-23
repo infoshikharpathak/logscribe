@@ -13,7 +13,7 @@ DEFAULT_PERSIST_DIR = Path.home() / ".logscribe" / "chroma"
 COLLECTION_NAME = "error_events"
 
 # Metadata fields a seeded incident carries (see load_seeds / `logscribe seed`).
-SEED_FIELDS = ("error_type", "service_name", "message", "symptom", "cause", "fix")
+SEED_FIELDS = ("error_type", "service_name", "endpoint", "message", "symptom", "cause", "fix")
 
 
 class ErrorMemory:
@@ -59,7 +59,7 @@ class ErrorMemory:
 
         self._collection.add(
             ids=[event.id],
-            documents=[event.to_document()],
+            documents=[event.embedding_text()],
             metadatas=[metadata],
         )
 
@@ -73,11 +73,13 @@ class ErrorMemory:
         service = incident.get("service_name") or ""
         slug = re.sub(r"[^a-z0-9]+", "-", f"{service}-{incident['error_type']}".lower()).strip("-")
         seed_id = f"seed-{incident.get('id') or slug}"
+        # Same shape as ErrorEvent.embedding_text(), so a live error matches it
+        # the way it would match a captured one.
         document = "\n".join(filter(None, [
-            f"service: {service}" if service else "",
             f"error_type: {incident['error_type']}",
             f"message: {incident['message']}",
-            f"symptom: {incident['symptom']}",
+            f"service: {service}" if service else "",
+            f"endpoint: {incident['endpoint']}" if incident.get("endpoint") else "",
         ]))
         metadata = {f: str(incident[f]) for f in SEED_FIELDS if incident.get(f)}
         metadata.update({"seeded": True, "timestamp": "seeded example", "source_file": "seed",

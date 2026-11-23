@@ -70,7 +70,7 @@ def watch(
 
     for chunk in sampler.tail(from_start=from_start):
         event = processor.process(chunk)
-        similar = memory.query_similar(event.to_document(), top_k=top_k, min_similarity=cfg.min_similarity)
+        similar = memory.query_similar(event.embedding_text(), top_k=top_k, min_similarity=cfg.min_similarity)
 
         where = f"{event.service_name} " if event.service_name else ""
         console.rule(f"[bold red]{where}{event.error_type}[/bold red] @ {event.timestamp}")

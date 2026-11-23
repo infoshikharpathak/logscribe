@@ -104,7 +104,7 @@ with tab_analyze:
 
             for chunk in chunks:
                 event = processor.process(chunk)
-                similar = memory.query_similar(event.to_document(), top_k=analyze_top_k)
+                similar = memory.query_similar(event.embedding_text(), top_k=analyze_top_k)
 
                 with st.container(border=True):
                     st.markdown(f"**{event.error_type}** — {event.timestamp}")
