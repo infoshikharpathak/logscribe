@@ -64,10 +64,21 @@ class OpenAIAnalyzer:
             lines.append("\n## Similar past errors (most similar first)")
             for i, item in enumerate(similar_events, start=1):
                 meta = item.get("metadata", {})
-                lines.append(
-                    f"\n{i}. [{meta.get('timestamp', 'unknown time')}] "
-                    f"{meta.get('error_type', 'UnknownError')}: {meta.get('message', '')}"
-                )
+                score = item.get("similarity")
+                score_text = f" (similarity {score:.2f})" if isinstance(score, (int, float)) else ""
+                if meta.get("seeded"):
+                    lines.append(
+                        f"\n{i}. [seeded example, resolved]{score_text} "
+                        f"{meta.get('error_type', 'UnknownError')}: {meta.get('message', '')}"
+                    )
+                    for label, key in (("Symptom", "symptom"), ("Cause", "cause"), ("Fix", "fix")):
+                        if meta.get(key):
+                            lines.append(f"   {label}: {meta[key]}")
+                else:
+                    lines.append(
+                        f"\n{i}. [{meta.get('timestamp', 'unknown time')}]{score_text} "
+                        f"{meta.get('error_type', 'UnknownError')}: {meta.get('message', '')}"
+                    )
         else:
             lines.append("\n## Similar past errors\nNone found — this is the first occurrence.")
 

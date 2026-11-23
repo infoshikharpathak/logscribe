@@ -46,6 +46,12 @@ def fetch_agent_forge_traces(
 
 @st.cache_resource
 def get_memory() -> ErrorMemory:
+    # LOGSCRIBE_CONFIG: browse the history a watch config uses (e.g. Ironclad's).
+    if os.getenv("LOGSCRIBE_CONFIG"):
+        from logscribe.config import load_config
+
+        cfg = load_config(os.environ["LOGSCRIBE_CONFIG"])
+        return ErrorMemory(persist_dir=cfg.persist_dir, collection_name=cfg.collection)
     return ErrorMemory()
 
 

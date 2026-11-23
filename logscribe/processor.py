@@ -16,6 +16,11 @@ KEY_VALUE_PATTERN = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^\s,;]+)")
 # JSON — everything else in the object becomes a key_variable automatically.
 _JSON_CORE_FIELDS = {"timestamp", "service_name", "level", "message", "error_type", "stack_trace"}
 
+# Per-occurrence values (unique per request) are kept as key_variables but
+# left out of the embedded document: they'd make two occurrences of the same
+# error look less alike.
+VOLATILE_FIELDS = {"request_id", "duration_ms", "trace_id", "attempts"}
+
 
 @dataclass
 class ErrorEvent:
@@ -30,12 +35,16 @@ class ErrorEvent:
     source_file: str
     line_number: int
     raw_context: str
+    service_name: str | None = None
 
     def to_document(self) -> str:
         """Flatten the event into a single text blob suitable for embedding."""
         parts = [f"error_type: {self.error_type}", f"message: {self.message}"]
-        if self.key_variables:
-            kv = ", ".join(f"{k}={v}" for k, v in self.key_variables.items())
+        if self.service_name:
+            parts.insert(0, f"service: {self.service_name}")
+        stable = {k: v for k, v in self.key_variables.items() if k not in VOLATILE_FIELDS}
+        if stable:
+            kv = ", ".join(f"{k}={v}" for k, v in stable.items())
             parts.append(f"variables: {kv}")
         if self.stack_trace:
             parts.append(f"stack_trace:\n{self.stack_trace}")
@@ -70,6 +79,7 @@ class ErrorProcessor:
             source_file=chunk.source_file,
             line_number=chunk.line_number,
             raw_context=context_text,
+            service_name=chunk.service_name,
         )
 
     def _process_json(self, chunk: RawErrorChunk, fields: dict, context_text: str) -> ErrorEvent:
@@ -95,6 +105,7 @@ class ErrorProcessor:
             source_file=chunk.source_file,
             line_number=chunk.line_number,
             raw_context=context_text,
+            service_name=str(fields["service_name"]) if fields.get("service_name") else chunk.service_name,
         )
 
     @staticmethod
