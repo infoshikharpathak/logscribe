@@ -15,6 +15,7 @@ persist_dir = "chroma"
 top_k = 3
 min_similarity = 0.3
 seeds = "seeds.json"
+repo_path = "${UNSET_DIR:-..}"
 
 [[sources]]
 service = "bank-service"
@@ -32,6 +33,7 @@ path = "${UNSET_DIR:-../logs}/agent.log"
     assert cfg.persist_dir == (tmp_path / "conf" / "chroma").resolve()
     assert cfg.seeds == (tmp_path / "conf" / "seeds.json").resolve()
     assert cfg.min_similarity == 0.3
+    assert cfg.repo_path == tmp_path
 
 
 @pytest.mark.parametrize("body, message", [

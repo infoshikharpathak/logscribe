@@ -8,6 +8,8 @@ where their error history lives, in one TOML file.
     top_k = 5
     min_similarity = 0.3                # drop weaker matches (cosine collections)
     seeds = "seed_incidents.json"       # for `logscribe seed --config ...`
+    repo_path = ".."                    # git repo of the watched app, for the
+                                        # Agent Forge analyzer's commit correlation
 
     [[sources]]
     service = "bank-service"
@@ -45,6 +47,7 @@ class WatchConfig:
     top_k: int = 5
     min_similarity: float | None = None
     seeds: Path | None = None
+    repo_path: Path | None = None
 
 
 _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -63,7 +66,7 @@ def load_config(path: str | Path) -> WatchConfig:
     path = Path(path)
     data = tomllib.loads(path.read_text())
     base = path.resolve().parent
-    known = {"name", "sources", "collection", "persist_dir", "buffer_size", "top_k", "min_similarity", "seeds"}
+    known = {"name", "sources", "collection", "persist_dir", "buffer_size", "top_k", "min_similarity", "seeds", "repo_path"}
     unknown = set(data) - known
     if unknown:
         raise ValueError(f"{path}: unknown setting(s) {', '.join(sorted(unknown))}")
@@ -83,4 +86,5 @@ def load_config(path: str | Path) -> WatchConfig:
         top_k=int(data.get("top_k", 5)),
         min_similarity=float(data["min_similarity"]) if data.get("min_similarity") is not None else None,
         seeds=_path(data["seeds"], base) if data.get("seeds") else None,
+        repo_path=_path(data["repo_path"], base) if data.get("repo_path") else None,
     )

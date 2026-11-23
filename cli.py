@@ -60,13 +60,15 @@ def watch(
     ])
     processor = ErrorProcessor()
     memory = ErrorMemory(persist_dir=cfg.persist_dir, collection_name=cfg.collection)
-    analyzer = build_analyzer()
+    analyzer = build_analyzer(repo_path=cfg.repo_path)
     curator = OnCallCurator()
 
     for src in cfg.sources:
         label = f" ({src.service})" if src.service else ""
         console.print(f"[bold green]Watching[/bold green] {src.path}{label}")
     console.print(f"buffer={buffer_size} lines, history={cfg.collection}, analyzer={type(analyzer).__name__}")
+    if getattr(analyzer, "repo_path", None):
+        console.print(f"git correlation: {analyzer.repo_path}")
 
     for chunk in sampler.tail(from_start=from_start):
         event = processor.process(chunk)

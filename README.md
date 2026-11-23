@@ -52,7 +52,10 @@ errors it has seen before.
    similar past errors, each with a similarity score (cosine, 1.0 =
    identical). Only the error's identity is embedded (type, message, service,
    endpoint, the exception's last line), so boilerplate shared by unrelated
-   errors doesn't decide the match. It can also hold **seeded incidents**:
+   errors doesn't decide the match. An event's own context is the failing
+   request's log lines (same `request_id`, else the same service's latest
+   lines), not the whole buffer, so another request's error is never taken
+   as this one's cause. It can also hold **seeded incidents**:
    resolved examples with a symptom, cause and fix, shown to the analyzer
    when they match. Also tracks which `error_type`s have been seen before.
 4. **analyzer.py** sends the new error plus similar past errors to an LLM for
@@ -119,6 +122,7 @@ collection = "ironclad_errors"
 top_k = 5
 min_similarity = 0.3          # drop weaker matches
 seeds = "seed_incidents.json" # for `logscribe seed --config ...`
+repo_path = "${IRONCLAD_REPO_PATH:-..}" # the app's git repo (Agent Forge analyzer)
 
 [[sources]]
 service = "bank-service"
@@ -130,7 +134,11 @@ path = "${IRONCLAD_LOG_DIR:-../logs}/agent-service.log"
 ```
 
 Paths are relative to the config file; `${VAR}` and `${VAR:-default}` are
-expanded. A file that doesn't exist yet is picked up once it's created; a
+expanded. `repo_path` is the watched app's git repo: with the Agent Forge
+analyzer, each analysis checks its recent commits and cites any it looked at.
+It wins over `LOGSCRIBE_REPO_PATH`, which stays the default for watches that
+don't set one. Agent Forge's git and file MCP servers must be allowed to read
+that repo (`mcp_servers.json` there; the git server takes one `--repository`). A file that doesn't exist yet is picked up once it's created; a
 truncated or rotated file is reread from the start. The Ironclad config and
 its seeded incidents live in the Ironclad repo (`logscribe/`).
 

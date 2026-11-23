@@ -3,7 +3,7 @@
 import json
 from types import SimpleNamespace
 
-from logscribe.analyzer import OpenAIAnalyzer
+from logscribe.analyzer import AgentForgeAnalyzer, OpenAIAnalyzer, build_analyzer
 from logscribe.incident import OnCallCurator
 from logscribe.processor import ErrorProcessor
 from logscribe.sampler import RawErrorChunk
@@ -56,3 +56,13 @@ def test_curator_and_analyzer_prompts_carry_only_the_requests_lines():
     assert "ConnectionRefused" not in sent["prompt"] and "OTP_INVALID" not in sent["prompt"]
     assert "ConnectionRefused" not in OpenAIAnalyzer._build_prompt(ev, [])
 
+
+def test_config_repo_path_wins_over_the_env_default(monkeypatch):
+    monkeypatch.setenv("LOGSCRIBE_ANALYZER", "agent_forge")
+    monkeypatch.setenv("LOGSCRIBE_REPO_PATH", "/env/default")
+    assert build_analyzer(repo_path="/srv/ironclad").repo_path == "/srv/ironclad"
+    assert build_analyzer().repo_path == "/env/default"
+    goal = AgentForgeAnalyzer._build_goal(case3_event([OTP3]), [], "/srv/ironclad")
+    assert "Repository path for git correlation: /srv/ironclad\n" in goal
+    assert "recent commits (git_log" in goal and "Cite the commit hash" in goal
+    assert "Repository path" not in AgentForgeAnalyzer._build_goal(case3_event([OTP3]), [], None)

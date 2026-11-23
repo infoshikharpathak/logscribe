@@ -138,15 +138,24 @@ class AgentForgeAnalyzer:
             "similar past errors as historical context if any are listed.\n\n" + context
         )
         if repo_path:
-            goal += f"\n\nRepository path for git correlation: {repo_path}"
+            goal += (
+                f"\n\nRepository path for git correlation: {repo_path}\n"
+                "Before concluding, check this repository's recent commits (git_log, then "
+                "git_show on any that touch the failing service or code path). Cite the "
+                "commit hash of any you looked at, and say whether one is implicated or not."
+            )
         return goal
 
 
-def build_analyzer() -> ErrorAnalyzer:
+def build_analyzer(repo_path: str | os.PathLike | None = None) -> ErrorAnalyzer:
     """Factory: OpenAIAnalyzer by default, or AgentForgeAnalyzer when
     LOGSCRIBE_ANALYZER=agent_forge is set — the drop-in swap analyzer.py was
-    built around from day one (see the ErrorAnalyzer Protocol above)."""
+    built around from day one (see the ErrorAnalyzer Protocol above).
+
+    *repo_path* (a watch config's repo_path) is the monitored app's git repo
+    for commit correlation; it wins over LOGSCRIBE_REPO_PATH, which is only
+    the default for watches that don't set one."""
     backend = os.getenv("LOGSCRIBE_ANALYZER", "openai").strip().lower()
     if backend == "agent_forge":
-        return AgentForgeAnalyzer()
+        return AgentForgeAnalyzer(repo_path=str(repo_path) if repo_path else None)
     return OpenAIAnalyzer()
