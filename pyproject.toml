@@ -25,3 +25,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 py-modules = ["cli"]
 packages = ["logscribe"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

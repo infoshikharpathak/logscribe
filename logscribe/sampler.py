@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections import deque
@@ -16,6 +17,31 @@ DEFAULT_ERROR_PATTERNS: list[str] = [
     r"Traceback \(most recent call last\)",
 ]
 
+# A structured JSON log line says its own level, so the level decides, not a
+# regex over the serialized object (an INFO line whose message happens to
+# say "Exception" isn't an error; an ERROR line always is).
+ERROR_LEVELS = frozenset({"ERROR", "CRITICAL", "FATAL"})
+
+
+def json_level(line: str) -> str | None:
+    """The "level" of a JSON object log line, or None if it isn't one."""
+    if not line.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("level"), str):
+        return None
+    return parsed["level"].upper()
+
+
+def is_error_line(line: str, patterns: list[Pattern[str]]) -> bool:
+    level = json_level(line)
+    if level is not None:
+        return level in ERROR_LEVELS
+    return any(pattern.search(line) for pattern in patterns)
+
 
 @dataclass
 class RawErrorChunk:
@@ -25,6 +51,7 @@ class RawErrorChunk:
     context_lines: list[str]
     source_file: str
     line_number: int
+    service_name: str | None = None
 
 
 class RollingBuffer:
@@ -41,7 +68,13 @@ class RollingBuffer:
 
 
 class LogSampler:
-    """Tails a log file and yields a RawErrorChunk each time a configured error pattern matches."""
+    """Tails a log file and yields a RawErrorChunk each time a configured error pattern matches.
+
+    *service_name* labels every chunk from this file (for structured logs,
+    the line's own service_name field wins). The file may not exist yet: the
+    sampler waits for it. If it shrinks (truncated or rotated), it's reopened
+    from the start.
+    """
 
     def __init__(
         self,
@@ -49,6 +82,7 @@ class LogSampler:
         patterns: list[str] | None = None,
         buffer_size: int = 50,
         poll_interval: float = 0.5,
+        service_name: str | None = None,
     ) -> None:
         self.file_path = Path(file_path)
         self._patterns: list[Pattern[str]] = [
@@ -56,9 +90,71 @@ class LogSampler:
         ]
         self._buffer = RollingBuffer(maxlen=buffer_size)
         self.poll_interval = poll_interval
+        self.service_name = service_name
+        self._f = None
+        self._line_number = 0
+        self._from_start = False
 
     def _is_error_line(self, line: str) -> bool:
-        return any(pattern.search(line) for pattern in self._patterns)
+        return is_error_line(line, self._patterns)
+
+    def open(self, from_start: bool = False) -> None:
+        self._from_start = from_start
+        self._reopen(at_end=not from_start)
+
+    def _reopen(self, at_end: bool) -> None:
+        if self._f is not None:
+            self._f.close()
+            self._f = None
+        self._line_number = 0
+        if not self.file_path.exists():
+            return  # created later: read it from its first line then
+        self._f = self.file_path.open("r", errors="replace")
+        if at_end:
+            self._f.seek(0, 2)
+
+    def close(self) -> None:
+        if self._f is not None:
+            self._f.close()
+            self._f = None
+
+    def read_available(self) -> list[RawErrorChunk]:
+        """Read every complete line written since the last call; return the
+        error chunks they contain (possibly none). Never blocks."""
+        if self._f is None:
+            if not self.file_path.exists():
+                return []
+            self._reopen(at_end=False)
+        try:
+            if self.file_path.stat().st_size < self._f.tell():
+                self._reopen(at_end=False)  # truncated or rotated
+        except FileNotFoundError:
+            self.close()
+            return []
+
+        chunks: list[RawErrorChunk] = []
+        while True:
+            pos = self._f.tell()
+            line = self._f.readline()
+            if not line:
+                break
+            if not line.endswith("\n"):
+                self._f.seek(pos)  # a line still being written: read it whole next time
+                break
+            self._line_number += 1
+            stripped = line.rstrip("\n")
+            self._buffer.append(stripped)
+            if not self._is_error_line(stripped):
+                continue
+            self._line_number = self._absorb_traceback(self._f, self._line_number)
+            chunks.append(RawErrorChunk(
+                trigger_line=stripped,
+                context_lines=self._buffer.snapshot(),
+                source_file=str(self.file_path),
+                line_number=self._line_number,
+                service_name=self.service_name,
+            ))
+        return chunks
 
     def tail(self, from_start: bool = False) -> Iterator[RawErrorChunk]:
         """Continuously tail the file, yielding a RawErrorChunk whenever an error line appears.
@@ -67,32 +163,15 @@ class LogSampler:
         so the sampler has zero extra runtime dependencies; swap in watchdog later if
         polling latency ever becomes a problem.
         """
-        with self.file_path.open("r", errors="replace") as f:
-            if not from_start:
-                f.seek(0, 2)  # jump to end of file
-
-            line_number = 0
+        self.open(from_start=from_start)
+        try:
             while True:
-                line = f.readline()
-                if not line:
+                chunks = self.read_available()
+                if not chunks:
                     time.sleep(self.poll_interval)
-                    continue
-
-                line_number += 1
-                stripped = line.rstrip("\n")
-                self._buffer.append(stripped)
-
-                if not self._is_error_line(stripped):
-                    continue
-
-                line_number = self._absorb_traceback(f, line_number)
-
-                yield RawErrorChunk(
-                    trigger_line=stripped,
-                    context_lines=self._buffer.snapshot(),
-                    source_file=str(self.file_path),
-                    line_number=line_number,
-                )
+                yield from chunks
+        finally:
+            self.close()
 
     def _absorb_traceback(self, f, line_number: int) -> int:
         """Pull a Python-style traceback into the buffer if one immediately follows
@@ -126,6 +205,36 @@ class LogSampler:
         return line_number
 
 
+class MultiFileSampler:
+    """Tails several log files in one process. Each file keeps its own
+    rolling buffer (context never mixes services) and service name."""
+
+    def __init__(self, samplers: list[LogSampler], poll_interval: float = 0.5) -> None:
+        if not samplers:
+            raise ValueError("MultiFileSampler needs at least one file")
+        self.samplers = samplers
+        self.poll_interval = poll_interval
+
+    def open(self, from_start: bool = False) -> None:
+        for sampler in self.samplers:
+            sampler.open(from_start=from_start)
+
+    def read_available(self) -> list[RawErrorChunk]:
+        return [chunk for sampler in self.samplers for chunk in sampler.read_available()]
+
+    def tail(self, from_start: bool = False) -> Iterator[RawErrorChunk]:
+        self.open(from_start=from_start)
+        try:
+            while True:
+                chunks = self.read_available()
+                if not chunks:
+                    time.sleep(self.poll_interval)
+                yield from chunks
+        finally:
+            for sampler in self.samplers:
+                sampler.close()
+
+
 def scan_lines(
     lines: list[str],
     patterns: list[str] | None = None,
@@ -147,7 +256,7 @@ def scan_lines(
         buffer.append(stripped)
         i += 1
 
-        if not any(pattern.search(stripped) for pattern in compiled):
+        if not is_error_line(stripped, compiled):
             continue
 
         if i < len(lines) and "Traceback (most recent call last)" in lines[i]:

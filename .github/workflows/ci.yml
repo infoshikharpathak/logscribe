@@ -1,10 +1,8 @@
 name: CI
 
-# No test suite yet — this is an honest smoke check, not a "tests passing"
-# claim: verifies the package installs cleanly and both the `logscribe`
-# package and the `cli` entry module import without error on a fresh
-# environment. A dummy API key avoids import-time failures from client
-# construction (no network calls are made).
+# Unit tests (no network, no model download: ChromaDB gets a test embedding)
+# plus an import smoke check. A dummy API key avoids import-time failures
+# from client construction.
 
 on:
   push:
@@ -23,7 +21,12 @@ jobs:
           python-version: "3.11"
 
       - name: Install package
-        run: pip install -e .
+        run: pip install -e ".[test]"
+
+      - name: Test
+        env:
+          OPENAI_API_KEY: dummy-key-for-ci
+        run: pytest -q
 
       - name: Import smoke test
         env:
