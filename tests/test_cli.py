@@ -1,5 +1,6 @@
 import functools
 import json
+import re
 
 from typer.testing import CliRunner
 
@@ -26,7 +27,9 @@ def test_seed_command_loads_the_config_seeds(tmp_path, monkeypatch):
 
 def test_watch_needs_exactly_one_of_file_or_config(tmp_path):
     result = CliRunner().invoke(cli.app, ["watch"])
-    assert result.exit_code != 0 and "--file" in result.output
+    # Rich colors the error box in CI (GITHUB_ACTIONS), splitting words with ANSI codes.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert result.exit_code == 2 and "--file" in plain and "not both" in plain
 
 
 def test_report_lines_carry_matches_and_scores(tmp_path):
